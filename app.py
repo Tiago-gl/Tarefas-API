@@ -13,8 +13,20 @@ except ImportError:
     load_dotenv = None
 
 app = Flask(__name__)
+
+def _parse_web_origins(value):
+    if not value or value.strip() == "*":
+        return "*"
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
+
 WEB_ORIGIN = os.environ.get("WEB_ORIGIN", "*")
-CORS(app, resources={r"/api/*": {"origins": WEB_ORIGIN}})
+ALLOWED_ORIGINS = _parse_web_origins(WEB_ORIGIN)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 if load_dotenv is not None and os.path.exists(os.path.join(os.path.dirname(__file__), ".env")):
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
