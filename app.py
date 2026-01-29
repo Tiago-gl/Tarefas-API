@@ -106,6 +106,21 @@ def handle_unique_violation(exc):
             message = "Ordem de apresentacao ja existe."
     return jsonify({"error": message}), 409
 
+def normalize_ordem_apresentacao(cur):
+    cur.execute(
+        """
+        WITH ordered AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (ORDER BY ordem_apresentacao, id) AS nova_ordem
+            FROM tarefas
+        )
+        UPDATE tarefas
+        SET ordem_apresentacao = ordered.nova_ordem
+        FROM ordered
+        WHERE tarefas.id = ordered.id
+        """
+    )
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
@@ -197,12 +212,16 @@ def update_tarefa(tarefa_id):
 def delete_tarefa(tarefa_id):
     conn = get_conn()
     try:
+        conn.autocommit = False
         with conn.cursor() as cur:
+            cur.execute("LOCK TABLE tarefas IN EXCLUSIVE MODE")
             cur.execute("DELETE FROM tarefas WHERE id = %s RETURNING id", (tarefa_id,))
             row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return jsonify({"error": "Tarefa nao encontrada."}), 404
+            normalize_ordem_apresentacao(cur)
         conn.commit()
-        if not row:
-            return jsonify({"error": "Tarefa nao encontrada."}), 404
         return jsonify({"success": True})
     finally:
         conn.close()
