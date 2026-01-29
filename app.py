@@ -13,11 +13,32 @@ except ImportError:
     load_dotenv = None
 
 app = Flask(__name__)
-WEB_ORIGIN = os.environ.get("WEB_ORIGIN", "*")
-CORS(app, resources={r"/api/*": {"origins": WEB_ORIGIN}})
 
 if load_dotenv is not None and os.path.exists(os.path.join(os.path.dirname(__file__), ".env")):
     load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+def _parse_web_origins(value):
+    if not value or value.strip() == "*":
+        return "*"
+    origins = []
+    for raw in value.split(","):
+        origin = raw.strip()
+        if not origin:
+            continue
+        if origin.lower().startswith("re:"):
+            origins.append(origin[3:])
+        else:
+            origins.append(origin)
+    return origins
+
+WEB_ORIGIN = os.environ.get("WEB_ORIGIN", "*")
+ALLOWED_ORIGINS = _parse_web_origins(WEB_ORIGIN)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 def get_conn():
     database_url = os.environ.get("DATABASE_URL")
