@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import psycopg2
 import psycopg2.extras
-from psycopg2 import errors
+from psycopg2 import errors as psycopg_errors
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -127,6 +127,12 @@ def handle_unique_violation(exc):
             message = "Ordem de apresentacao ja existe."
     return jsonify({"error": message}), 409
 
+def handle_data_error(exc):
+    detail = str(exc).lower()
+    if isinstance(exc, psycopg_errors.NumericValueOutOfRange) or "numeric" in detail or "out of range" in detail:
+        return jsonify({"errors": {"custo": "Custo fora do limite permitido."}}), 400
+    return jsonify({"error": "Erro de validacao ao salvar tarefa."}), 400
+
 def normalize_ordem_apresentacao(cur):
     cur.execute(
         """
@@ -167,33 +173,60 @@ def list_tarefas():
 @app.route("/api/tarefas", methods=["POST"])
 def create_tarefa():
     data = request.get_json(silent=True) or {}
-    errors, nome, custo, data_limite, ordem_apresentacao = validate_payload(data, allow_order=True)
-    if errors:
-        return jsonify({"errors": errors}), 400
+    errors_map, nome, custo, data_limite, ordem_apresentacao = validate_payload(data, allow_order=True)
+    if errors_map:
+        return jsonify({"errors": errors_map}), 400
 
     conn = get_conn()
     try:
         conn.autocommit = False
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("LOCK TABLE tarefas IN EXCLUSIVE MODE")
+            cur.execute(
+                """
+                SELECT gs.id AS next_id
+                FROM generate_series(
+                    1,
+                    COALESCE((SELECT MAX(id) FROM tarefas), 0) + 1
+                ) AS gs(id)
+                LEFT JOIN tarefas t ON t.id = gs.id
+                WHERE t.id IS NULL
+                ORDER BY gs.id
+                LIMIT 1
+                """
+            )
+            next_id = cur.fetchone()["next_id"]
+
             if ordem_apresentacao is None:
-                cur.execute("LOCK TABLE tarefas IN EXCLUSIVE MODE")
                 cur.execute("SELECT COALESCE(MAX(ordem_apresentacao), 0) + 1 AS next_ordem FROM tarefas")
                 ordem_apresentacao = cur.fetchone()["next_ordem"]
 
             cur.execute(
                 """
-                INSERT INTO tarefas (nome, custo, data_limite, ordem_apresentacao)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO tarefas (id, nome, custo, data_limite, ordem_apresentacao)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id, nome, custo, data_limite, ordem_apresentacao
                 """,
-                (nome, custo, data_limite, ordem_apresentacao),
+                (next_id, nome, custo, data_limite, ordem_apresentacao),
             )
             row = cur.fetchone()
+            cur.execute(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence('tarefas', 'id'),
+                    COALESCE((SELECT MAX(id) FROM tarefas), 0) + 1,
+                    false
+                )
+                """
+            )
         conn.commit()
         return jsonify(serialize_task(row)), 201
-    except errors.UniqueViolation as exc:
+    except psycopg_errors.UniqueViolation as exc:
         conn.rollback()
         return handle_unique_violation(exc)
+    except psycopg2.DataError as exc:
+        conn.rollback()
+        return handle_data_error(exc)
     finally:
         conn.close()
 
@@ -222,9 +255,12 @@ def update_tarefa(tarefa_id):
         if not row:
             return jsonify({"error": "Tarefa nao encontrada."}), 404
         return jsonify(serialize_task(row))
-    except errors.UniqueViolation as exc:
+    except psycopg_errors.UniqueViolation as exc:
         conn.rollback()
         return handle_unique_violation(exc)
+    except psycopg2.DataError as exc:
+        conn.rollback()
+        return handle_data_error(exc)
     finally:
         conn.close()
 
